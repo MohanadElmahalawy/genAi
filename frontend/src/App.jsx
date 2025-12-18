@@ -70,9 +70,21 @@ function App() {
         } else if (data.phase === 'design') {
           setTestCases(data.data);
           addMessage('agent', `Created ${data.data.test_cases.length} test cases`);
+        } else if (data.phase === 'design_refinement') {
+          setTestCases(data.data);
+          addMessage('success', 'Test cases refined successfully');
         } else if (data.phase === 'generation') {
           setGeneratedCode(data.data.code);
-          addMessage('agent', 'Test code generated successfully');
+          // If backend included verification results with generation, store them
+          if (data.data.verification) {
+            setVerificationResults(data.data.verification);
+            addMessage('success', `Verification: ${data.data.verification.passed} passed, ${data.data.verification.failed} failed`);
+          } else {
+            addMessage('agent', 'Test code generated successfully');
+          }
+        } else if (data.phase === 'generation_refinement') {
+          setGeneratedCode(data.data.code);
+          addMessage('success', 'Generated code refined successfully');
         } else if (data.phase === 'verification') {
           setVerificationResults(data.data);
           addMessage('success', `Tests: ${data.data.passed} passed, ${data.data.failed} failed`);
@@ -139,6 +151,28 @@ function App() {
     addMessage('system', 'Agent reset');
   };
 
+  const handleRefine = (feedback) => {
+    if (!testCases) {
+      addMessage('error', 'No test cases to refine');
+      return;
+    }
+
+    addMessage('user', `Refine feedback: ${feedback}`);
+    sendCommand('refine', { feedback, current_cases: testCases });
+  };
+
+  const [codeIssue, setCodeIssue] = useState('');
+
+  const handleRefineCode = () => {
+    if (!generatedCode) {
+      addMessage('error', 'No generated code to refine');
+      return;
+    }
+
+    addMessage('user', `Refine code issue: ${codeIssue}`);
+    sendCommand('refine_code', { issue: codeIssue, current_code: generatedCode });
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -187,7 +221,7 @@ function App() {
             {/* Test Cases Reviewer */}
             {testCases && (
               <div className="mt-6">
-                <TestCaseReviewer testCases={testCases} />
+                <TestCaseReviewer testCases={testCases} onRefine={handleRefine} />
               </div>
             )}
 
@@ -195,9 +229,34 @@ function App() {
             {generatedCode && (
               <div className="mt-6 bg-white rounded-lg shadow p-6">
                 <h3 className="text-lg font-semibold mb-4">Generated Test Code</h3>
-                <pre className="bg-gray-900 text-green-400 p-4 rounded overflow-x-auto text-sm">
+                <pre className="bg-gray-900 text-green-400 p-4 rounded overflow-x-auto text-sm max-h-80">
                   <code>{generatedCode}</code>
                 </pre>
+
+                <div className="mt-4 p-4 bg-gray-50 rounded border border-gray-200">
+                  <h4 className="font-medium mb-2">Report Issue / Request Fix</h4>
+                  <textarea
+                    value={codeIssue}
+                    onChange={(e) => setCodeIssue(e.target.value)}
+                    placeholder="Describe the issue or requested change (e.g. failing assertion, selector problem)"
+                    className="w-full p-3 border border-gray-300 rounded-md text-sm"
+                    rows={3}
+                  />
+                  <div className="mt-3 flex gap-2 justify-end">
+                    <button
+                      onClick={() => setCodeIssue('')}
+                      className="px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={handleRefineCode}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                    >
+                      Refine Code
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
