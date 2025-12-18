@@ -94,6 +94,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 await handle_explore(websocket, payload)
             elif command == "design":
                 await handle_design(websocket, payload)
+            elif command == "refine":
+                await handle_refine(websocket, payload)
+            elif command == "refine_code":
+                await handle_refine_code(websocket, payload)
             elif command == "generate":
                 await handle_generate(websocket, payload)
             elif command == "verify":
@@ -209,6 +213,81 @@ async def handle_design(websocket: WebSocket, payload: dict):
             "message": str(e)
         })
 
+
+async def handle_refine(websocket: WebSocket, payload: dict):
+    """Refine existing test cases based on user feedback"""
+    if not agent_state.test_cases:
+        await websocket.send_json({"type": "error", "message": "No existing test cases to refine"})
+        return
+
+    feedback = payload.get("feedback", "")
+
+    await websocket.send_json({
+        "type": "phase_start",
+        "phase": "design_refinement",
+        "message": "Refining test cases based on feedback..."
+    })
+
+    try:
+        # Ensure designer exists
+        if not agent_state.designer:
+            agent_state.designer = TestDesigner(agent_state.llm_client, agent_state.metrics)
+
+        agent_state.current_phase = "design_refinement"
+
+        refined = await agent_state.designer.refine(agent_state.test_cases, feedback, websocket)
+        # designer.refine returns dict with keys test_cases, coverage, timestamp
+        agent_state.test_cases = {
+            "test_cases": refined.get("test_cases", agent_state.test_cases.get("test_cases")),
+            "coverage": refined.get("coverage", agent_state.test_cases.get("coverage")),
+            "timestamp": refined.get("timestamp", agent_state.metrics.get_timestamp())
+        }
+
+        await websocket.send_json({
+            "type": "phase_complete",
+            "phase": "design_refinement",
+            "data": agent_state.test_cases,
+            "metrics": agent_state.metrics.get_current()
+        })
+
+    except Exception as e:
+        await websocket.send_json({"type": "error", "phase": "design_refinement", "message": str(e)})
+
+
+async def handle_refine_code(websocket: WebSocket, payload: dict):
+    """Refine generated test code based on reported issue"""
+    if not agent_state.generated_code:
+        await websocket.send_json({"type": "error", "message": "No generated code to refine"})
+        return
+
+    issue = payload.get("issue", "")
+
+    await websocket.send_json({
+        "type": "phase_start",
+        "phase": "generation_refinement",
+        "message": "Refining generated code based on issue..."
+    })
+
+    try:
+        # Ensure generator exists
+        if not agent_state.generator:
+            agent_state.generator = CodeGenerator(agent_state.llm_client, agent_state.metrics)
+
+        agent_state.current_phase = "generation_refinement"
+
+        refined_code = await agent_state.generator.refine_code(agent_state.generated_code, issue, websocket)
+        agent_state.generated_code = refined_code
+
+        await websocket.send_json({
+            "type": "phase_complete",
+            "phase": "generation_refinement",
+            "data": {"code": agent_state.generated_code},
+            "metrics": agent_state.metrics.get_current()
+        })
+
+    except Exception as e:
+        await websocket.send_json({"type": "error", "phase": "generation_refinement", "message": str(e)})
+
 async def handle_generate(websocket: WebSocket, payload: dict):
     """Phase 3: Generate test code"""
     if not agent_state.test_cases:
@@ -229,19 +308,32 @@ async def handle_generate(websocket: WebSocket, payload: dict):
             agent_state.llm_client,
             agent_state.metrics
         )
-        
+
+        # Ensure verifier exists
+        if not agent_state.verifier:
+            agent_state.verifier = TestVerifier(agent_state.browser_manager, agent_state.metrics)
+
         agent_state.current_phase = "generation"
+
+        # Generate initial code
         code = await agent_state.generator.generate(
             agent_state.page_knowledge,
             agent_state.test_cases,
             websocket
         )
-        agent_state.generated_code = code
-        
+
+        # Verify and refine automatically; returns dict {code, verification}
+        vr = await agent_state.generator.verify_and_refine(code, agent_state.verifier, websocket)
+
+        final_code = vr.get("code") if isinstance(vr, dict) else code
+        verification = vr.get("verification") if isinstance(vr, dict) else None
+
+        agent_state.generated_code = final_code
+
         await websocket.send_json({
             "type": "phase_complete",
             "phase": "generation",
-            "data": {"code": code},
+            "data": {"code": final_code, "verification": verification},
             "metrics": agent_state.metrics.get_current()
         })
         

@@ -143,3 +143,56 @@ Only return the Python code, no explanations.
         })
         
         return self._extract_code(result["text"])
+
+    async def verify_and_refine(self, code: str, verifier, websocket, max_rounds: int = 3) -> str:
+        """
+        Verify generated code using the TestVerifier. If verification fails,
+        pass the failures to `refine_code` and retry up to `max_rounds` times.
+        Returns the last produced code (successful or final attempt).
+        """
+
+        last_result = None
+        for attempt in range(1, max_rounds + 1):
+            await websocket.send_json({
+                "type": "progress",
+                "message": f"Verifying generated tests (attempt {attempt}/{max_rounds})..."
+            })
+
+            result = await verifier.verify(code, websocket)
+            last_result = result
+
+            # Record verification metrics
+            try:
+                self.metrics.add_iteration({
+                    "phase": "verification_attempt",
+                    "tokens": 0,
+                    "time": result.get("execution_time", result.get("execution_time", 0))
+                })
+            except Exception:
+                pass
+
+            if result.get("success"):
+                await websocket.send_json({
+                    "type": "progress",
+                    "message": "Generated tests passed verification."
+                })
+                return {"code": code, "verification": result}
+
+            # Verification failed: prepare issue text and attempt refinement
+            issue = result.get("output") or "Tests failed during execution"
+
+            await websocket.send_json({
+                "type": "progress",
+                "message": f"Verification failed (attempt {attempt}). Refining code..."
+            })
+
+            # Call refine_code to get a corrected version
+            code = await self.refine_code(code, issue, websocket)
+
+        # Final verification attempt result not successful (or max rounds reached)
+        await websocket.send_json({
+            "type": "progress",
+            "message": "Reached max refinement attempts; returning latest code." 
+        })
+
+        return {"code": code, "verification": last_result}

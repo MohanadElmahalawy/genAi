@@ -1,9 +1,13 @@
 import { CheckCircle, AlertCircle, FileText } from 'lucide-react';
 
-export default function TestCaseReviewer({ testCases }) {
+import { useState } from 'react';
+
+export default function TestCaseReviewer({ testCases, onRefine }) {
   if (!testCases || !testCases.test_cases) {
     return null;
   }
+
+  const [feedback, setFeedback] = useState('');
 
   const getPriorityColor = (priority) => {
     switch (priority?.toLowerCase()) {
@@ -126,6 +130,29 @@ export default function TestCaseReviewer({ testCases }) {
             </div>
           </div>
         )}
+
+        {/* Refinement UI */}
+        <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+          <h4 className="font-medium text-gray-900 mb-2">Refine Test Cases</h4>
+          <textarea
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            placeholder="Provide feedback or changes for the test cases (e.g. change priority, add edge case)..."
+            className="w-full p-3 border border-gray-300 rounded-md resize-none text-sm"
+            rows={4}
+          />
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={() => {
+                if (onRefine) onRefine(feedback);
+              }}
+              disabled={!onRefine}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              Refine
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
