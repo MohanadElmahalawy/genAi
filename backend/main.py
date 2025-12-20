@@ -8,13 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import asyncio
 import json
+import pathlib
 from datetime import datetime
 
 from agent.explorer import PageExplorer
 from agent.designer import TestDesigner
 from agent.generator import CodeGenerator
 from agent.verifier import TestVerifier
-from agent.llm_client import LLMClient
+from agent.llm_client import LLMClient, NoTokensError
 from utils.browser import BrowserManager
 from utils.metrics import MetricsTracker
 
@@ -69,6 +70,19 @@ async def health():
         "metrics": agent_state.metrics.get_summary()
     }
 
+
+@app.get("/reports/verification")
+async def get_verification_report():
+    """Return latest verification report JSON if present."""
+    report_path = pathlib.Path(__file__).resolve().parents[0] / "verification_with_screenshots.json"
+    if report_path.exists():
+        try:
+            text = report_path.read_text(encoding="utf-8")
+            return JSONResponse(content=json.loads(text))
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": str(e)})
+    return JSONResponse(status_code=404, content={"error": "report not found"})
+
 @app.post("/reset")
 async def reset_agent():
     """Reset the agent to initial state"""
@@ -120,10 +134,17 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
-        await websocket.send_json({
-            "type": "error",
-            "message": str(e)
-        })
+        # If token exhaustion occurred, send a clear message
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({
+                "type": "error",
+                "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
+            })
+        else:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
 
 async def handle_explore(websocket: WebSocket, payload: dict):
     """Phase 1: Explore the page"""
@@ -161,9 +182,15 @@ async def handle_explore(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "exploration",
             "data": page_knowledge,
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("exploration")
         })
         
+    except NoTokensError:
+        await websocket.send_json({
+            "type": "error",
+            "phase": "exploration",
+            "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
+        })
     except Exception as e:
         await websocket.send_json({
             "type": "error",
@@ -203,15 +230,22 @@ async def handle_design(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "design",
             "data": test_cases,
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("design")
         })
         
     except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "phase": "design",
-            "message": str(e)
-        })
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({
+                "type": "error",
+                "phase": "design",
+                "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
+            })
+        else:
+            await websocket.send_json({
+                "type": "error",
+                "phase": "design",
+                "message": str(e)
+            })
 
 
 async def handle_refine(websocket: WebSocket, payload: dict):
@@ -247,11 +281,14 @@ async def handle_refine(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "design_refinement",
             "data": agent_state.test_cases,
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("design_refinement")
         })
 
     except Exception as e:
-        await websocket.send_json({"type": "error", "phase": "design_refinement", "message": str(e)})
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({"type": "error", "phase": "design_refinement", "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."})
+        else:
+            await websocket.send_json({"type": "error", "phase": "design_refinement", "message": str(e)})
 
 
 async def handle_refine_code(websocket: WebSocket, payload: dict):
@@ -282,11 +319,14 @@ async def handle_refine_code(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "generation_refinement",
             "data": {"code": agent_state.generated_code},
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("generation_refinement")
         })
 
     except Exception as e:
-        await websocket.send_json({"type": "error", "phase": "generation_refinement", "message": str(e)})
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({"type": "error", "phase": "generation_refinement", "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."})
+        else:
+            await websocket.send_json({"type": "error", "phase": "generation_refinement", "message": str(e)})
 
 async def handle_generate(websocket: WebSocket, payload: dict):
     """Phase 3: Generate test code"""
@@ -334,15 +374,22 @@ async def handle_generate(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "generation",
             "data": {"code": final_code, "verification": verification},
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("generation")
         })
         
     except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "phase": "generation",
-            "message": str(e)
-        })
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({
+                "type": "error",
+                "phase": "generation",
+                "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
+            })
+        else:
+            await websocket.send_json({
+                "type": "error",
+                "phase": "generation",
+                "message": str(e)
+            })
 
 async def handle_verify(websocket: WebSocket, payload: dict):
     """Phase 4: Verify tests"""
@@ -375,15 +422,22 @@ async def handle_verify(websocket: WebSocket, payload: dict):
             "type": "phase_complete",
             "phase": "verification",
             "data": results,
-            "metrics": agent_state.metrics.get_current()
+            "metrics": agent_state.metrics.get_phase("verification")
         })
         
     except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "phase": "verification",
-            "message": str(e)
-        })
+        if isinstance(e, NoTokensError):
+            await websocket.send_json({
+                "type": "error",
+                "phase": "verification",
+                "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
+            })
+        else:
+            await websocket.send_json({
+                "type": "error",
+                "phase": "verification",
+                "message": str(e)
+            })
 
 async def handle_chat(websocket: WebSocket, payload: dict):
     """Handle general chat interactions"""

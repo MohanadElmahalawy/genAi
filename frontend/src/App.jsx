@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import ChatInterface from './components/ChatInterface';
 import MetricsDashboard from './components/MetricsDashboard';
 import TestCaseReviewer from './components/TestCaseReviewer';
+import ElementsList from './components/ElementsList';
+import VerificationReport from './components/VerificationReport';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Activity, RotateCcw } from 'lucide-react';
 
 function App() {
@@ -9,10 +13,14 @@ function App() {
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [currentPhase, setCurrentPhase] = useState(null);
-  const [metrics, setMetrics] = useState(null);
+  const [metricsByPhase, setMetricsByPhase] = useState({});
+  const [completedPhases, setCompletedPhases] = useState([]);
+  const [pageKnowledge, setPageKnowledge] = useState(null);
+  const [selectedMetricsPhase, setSelectedMetricsPhase] = useState('aggregate');
   const [testCases, setTestCases] = useState(null);
   const [generatedCode, setGeneratedCode] = useState(null);
   const [verificationResults, setVerificationResults] = useState(null);
+  const [verificationReport, setVerificationReport] = useState(null);
 
   useEffect(() => {
     // Connect to WebSocket
@@ -49,6 +57,12 @@ function App() {
 
   const handleWebSocketMessage = (data) => {
     console.log('Received:', data);
+    // If backend reports metrics and total_tokens is 0, show a clear error
+    if (data.metrics && typeof data.metrics.total_tokens !== 'undefined') {
+      if (Number(data.metrics.total_tokens) === 0) {
+        addMessage('error', 'No more tokens available — please refill quota or reset the agent');
+      }
+    }
 
     switch (data.type) {
       case 'phase_start':
@@ -62,11 +76,14 @@ function App() {
 
       case 'phase_complete':
         addMessage('success', `${data.phase} phase completed!`);
-        setMetrics(data.metrics);
+        // store metrics per phase so UI can show the correct metrics
+        setMetricsByPhase((prev) => ({ ...prev, [data.phase]: data.metrics || {} }));
 
         // Store phase-specific data
         if (data.phase === 'exploration') {
-          addMessage('agent', `Found ${data.data.elements.length} testable elements`);
+          // store page knowledge so UI can show extracted elements
+          setPageKnowledge(data.data);
+          addMessage('agent', `Found ${data.data.elements?.length || 0} testable elements`);
         } else if (data.phase === 'design') {
           setTestCases(data.data);
           addMessage('agent', `Created ${data.data.test_cases.length} test cases`);
@@ -89,6 +106,9 @@ function App() {
           setVerificationResults(data.data);
           addMessage('success', `Tests: ${data.data.passed} passed, ${data.data.failed} failed`);
         }
+        // mark phase completed
+        setCurrentPhase(null);
+        setCompletedPhases((prev) => (prev.includes(data.phase) ? prev : [...prev, data.phase]));
         break;
 
       case 'error':
@@ -122,16 +142,31 @@ function App() {
 
   const handleExplore = (url) => {
     addMessage('user', `Explore: ${url}`);
+    // Clear downstream phase completions and artifacts when starting a new exploration
+    setCompletedPhases([]);
+    setPageKnowledge(null);
+    setTestCases(null);
+    setGeneratedCode(null);
+    setVerificationResults(null);
     sendCommand('explore', { url });
   };
 
   const handleDesign = () => {
     addMessage('user', 'Design test cases');
+    // Starting design should clear downstream artifacts (generation, verification)
+    setCompletedPhases((prev) => prev.filter((p) => p === 'exploration'));
+    setTestCases(null);
+    setGeneratedCode(null);
+    setVerificationResults(null);
     sendCommand('design');
   };
 
   const handleGenerate = () => {
     addMessage('user', 'Generate test code');
+    // Starting generation should clear verification artifacts
+    setCompletedPhases((prev) => prev.filter((p) => p === 'exploration' || p === 'design'));
+    setVerificationResults(null);
+    setGeneratedCode(null);
     sendCommand('generate');
   };
 
@@ -140,14 +175,33 @@ function App() {
     sendCommand('verify');
   };
 
+  const loadVerificationReport = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/reports/verification');
+      if (!res.ok) {
+        addMessage('error', `Failed to load report: ${res.status}`);
+        return;
+      }
+      const data = await res.json();
+      setVerificationReport(data);
+      addMessage('agent', 'Loaded verification report');
+    } catch (e) {
+      addMessage('error', `Error loading report: ${e.message}`);
+    }
+  };
+
   const handleReset = () => {
     sendCommand('reset');
     setMessages([]);
     setCurrentPhase(null);
-    setMetrics(null);
+    setMetricsByPhase({});
+    setCompletedPhases([]);
     setTestCases(null);
+    setPageKnowledge(null);
     setGeneratedCode(null);
     setVerificationResults(null);
+    setSelectedMetricsPhase('aggregate');
+    setCodeIssue('');
     addMessage('system', 'Agent reset');
   };
 
@@ -172,6 +226,30 @@ function App() {
     addMessage('user', `Refine code issue: ${codeIssue}`);
     sendCommand('refine_code', { issue: codeIssue, current_code: generatedCode });
   };
+
+  const aggregateMetrics = (byPhase) => {
+    const keys = Object.keys(byPhase);
+    if (keys.length === 0) return null;
+    const aggregated = { avg_response_time: 0, total_tokens: 0, iterations: 0, total_time: 0 };
+    let count = 0;
+    keys.forEach((k) => {
+      const m = byPhase[k] || {};
+      if (m.avg_response_time) {
+        aggregated.avg_response_time += m.avg_response_time;
+        count += 1;
+      }
+      aggregated.total_tokens += m.total_tokens || 0;
+      aggregated.iterations += m.iterations || 0;
+      aggregated.total_time += m.total_time || 0;
+    });
+    if (count > 0) aggregated.avg_response_time = aggregated.avg_response_time / count;
+    return aggregated;
+  };
+
+  const metricsToShow = currentPhase ? metricsByPhase[currentPhase] : aggregateMetrics(metricsByPhase);
+  const metricsToDisplay = selectedMetricsPhase && selectedMetricsPhase !== 'aggregate'
+    ? metricsByPhase[selectedMetricsPhase] || null
+    : (currentPhase ? metricsByPhase[currentPhase] : aggregateMetrics(metricsByPhase));
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -216,9 +294,14 @@ function App() {
               onVerify={handleVerify}
               currentPhase={currentPhase}
               isConnected={isConnected}
+              completedPhases={completedPhases}
             />
 
             {/* Test Cases Reviewer */}
+            {pageKnowledge && pageKnowledge.elements && (
+              <ElementsList knowledge={pageKnowledge} />
+            )}
+
             {testCases && (
               <div className="mt-6">
                 <TestCaseReviewer testCases={testCases} onRefine={handleRefine} />
@@ -229,9 +312,11 @@ function App() {
             {generatedCode && (
               <div className="mt-6 bg-white rounded-lg shadow p-6">
                 <h3 className="text-lg font-semibold mb-4">Generated Test Code</h3>
-                <pre className="bg-gray-900 text-green-400 p-4 rounded overflow-x-auto text-sm max-h-80">
-                  <code>{generatedCode}</code>
-                </pre>
+                <div className="bg-gray-900 p-2 rounded overflow-x-auto text-sm max-h-80">
+                  <SyntaxHighlighter language="python" style={oneDark} showLineNumbers wrapLongLines>
+                    {generatedCode}
+                  </SyntaxHighlighter>
+                </div>
 
                 <div className="mt-4 p-4 bg-gray-50 rounded border border-gray-200">
                   <h4 className="font-medium mb-2">Report Issue / Request Fix</h4>
@@ -285,13 +370,35 @@ function App() {
                 <pre className="mt-4 bg-gray-100 p-4 rounded text-xs overflow-x-auto max-h-64">
                   {verificationResults.output}
                 </pre>
+                  <div className="mt-4 flex gap-2">
+                    <button onClick={loadVerificationReport} className="px-3 py-2 bg-blue-600 text-white rounded">Load Report</button>
+                  </div>
               </div>
             )}
+
+              {/* Report screenshots (from file endpoint) */}
+              {verificationReport && (
+                <VerificationReport report={verificationReport} />
+              )}
           </div>
 
           {/* Right Column - Metrics Dashboard */}
           <div className="lg:col-span-1">
-            <MetricsDashboard metrics={metrics} currentPhase={currentPhase} />
+            <div className="bg-white rounded-lg shadow p-4 mb-4">
+              <label className="text-sm text-gray-700 mr-2">View metrics for:</label>
+              <select
+                value={selectedMetricsPhase}
+                onChange={(e) => setSelectedMetricsPhase(e.target.value)}
+                className="ml-2 px-2 py-1 border border-gray-200 rounded-md text-sm"
+              >
+                <option value="aggregate">All Phases (aggregate)</option>
+                {completedPhases.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </div>
+
+            <MetricsDashboard metrics={metricsToDisplay} currentPhase={currentPhase} />
           </div>
         </div>
       </div>

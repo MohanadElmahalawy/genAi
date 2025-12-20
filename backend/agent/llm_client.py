@@ -12,6 +12,11 @@ from google.genai import types
 
 load_dotenv()
 
+
+class NoTokensError(Exception):
+    """Raised when the LLM provider reports zero available tokens."""
+    pass
+
 class LLMClient:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -44,7 +49,11 @@ class LLMClient:
             
             # The new SDK provides real token counts in usage_metadata (no more estimation!)
             tokens = response.usage_metadata.total_token_count
-            
+
+            # If the provider reports zero tokens, treat as token exhaustion and stop
+            if tokens == 0:
+                raise NoTokensError("No tokens available from LLM provider")
+
             return {
                 "text": response.text,
                 "tokens": tokens,
@@ -52,9 +61,14 @@ class LLMClient:
             }
             
         except Exception as e:
-            print(f"LLM Error: {e}")
+            # Detect quota / resource exhausted errors and escalate as NoTokensError
+            err_str = str(e)
+            print(f"LLM Error: {err_str}")
+            if "RESOURCE_EXHAUSTED" in err_str or "exceeded your current quota" in err_str or "quota" in err_str.lower():
+                raise NoTokensError(err_str)
+
             return {
-                "text": f"Error: {str(e)}",
+                "text": f"Error: {err_str}",
                 "tokens": 0,
                 "time": time.time() - start_time
             }

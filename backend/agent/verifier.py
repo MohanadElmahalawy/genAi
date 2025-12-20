@@ -9,6 +9,9 @@ import os
 import subprocess
 import time
 import re
+import base64
+import json
+import pathlib
 
 class TestVerifier:
     def __init__(self, browser_manager, metrics):
@@ -23,6 +26,16 @@ class TestVerifier:
             "type": "progress",
             "message": "Setting up test environment..."
         })
+        # If a BrowserManager was provided, ensure a page exists so we can
+        # capture screenshots as part of evidence.
+        if self.browser:
+            try:
+                page = self.browser.get_page()
+                if not page:
+                    await self.browser.launch(headless=True)
+            except Exception:
+                # Don't fail verification just because screenshots can't be taken
+                pass
         
         # Create temporary test file
         with tempfile.NamedTemporaryFile(
@@ -43,13 +56,55 @@ class TestVerifier:
             
             # Execute tests
             result = await self._run_pytest(test_file, websocket)
-            
+
+            # Attempt to capture a screenshot of the current page (if available)
+            screenshots = []
+            try:
+                if self.browser and self.browser.get_page():
+                    shot = await self.browser.screenshot()
+                    if shot:
+                        b64 = base64.b64encode(shot).decode('utf-8')
+                        url = None
+                        try:
+                            url = self.browser.get_page().url
+                        except Exception:
+                            url = None
+                        screenshots.append({
+                            "image_base64": b64,
+                            "url": url,
+                            "timestamp": time.time()
+                        })
+            except Exception:
+                # Swallow screenshot errors; verification should still return results
+                pass
+
+            # Attach screenshots to result and record metrics
+            try:
+                result["screenshots"] = screenshots
+            except Exception:
+                result["screenshots"] = []
+
             self.metrics.add_iteration({
                 "phase": "verification",
                 "tokens": 0,  # No LLM calls
-                "time": result["execution_time"]
+                "time": result.get("execution_time", 0)
             })
-            
+
+            # Persist the verification report to backend/verification_with_screenshots.json
+            try:
+                report_path = pathlib.Path(__file__).resolve().parents[0] / "verification_with_screenshots.json"
+                tmp_path = report_path.with_suffix('.json.tmp')
+                with open(tmp_path, 'w', encoding='utf-8') as rf:
+                    json.dump({
+                        "result": result,
+                        "timestamp": time.time()
+                    }, rf, indent=2)
+                # atomic replace
+                os.replace(str(tmp_path), str(report_path))
+            except Exception:
+                # File write failures should not break verification flow
+                pass
+
             return result
             
         finally:
@@ -139,7 +194,7 @@ class TestVerifier:
                 "errors": errors,
                 "output": output,
                 "execution_time": execution_time,
-                "screenshots": [],  # Could capture screenshots here
+                "screenshots": [],
                 "timestamp": time.time()
             }
             
@@ -159,9 +214,15 @@ class TestVerifier:
         """Capture screenshots and other evidence during test execution"""
         
         screenshot = await page.screenshot()
-        
+        b64 = None
+        if screenshot:
+            try:
+                b64 = base64.b64encode(screenshot).decode('utf-8')
+            except Exception:
+                b64 = None
+
         return {
-            "screenshot": screenshot,
-            "url": page.url,
+            "screenshot_base64": b64,
+            "url": getattr(page, 'url', None),
             "timestamp": time.time()
         }

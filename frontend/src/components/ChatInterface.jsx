@@ -9,6 +9,7 @@ export default function ChatInterface({
   onVerify,
   currentPhase,
   isConnected,
+  completedPhases = [],
 }) {
   const [url, setUrl] = useState('https://example.com');
   const messagesEndRef = useRef(null);
@@ -103,30 +104,40 @@ export default function ChatInterface({
 
         {/* Phase Buttons */}
         <div className="grid grid-cols-3 gap-2">
-          <button
-            onClick={onDesign}
-            disabled={!isConnected}
+            {(() => {
+              const canDesign = isConnected && (currentPhase === 'design' || completedPhases.includes('exploration'));
+              const canGenerate = isConnected && (currentPhase === 'generation' || completedPhases.includes('design'));
+              const canVerify = isConnected && (currentPhase === 'verification' || completedPhases.includes('generation'));
+
+              return (
+                <>
+                  <button
+                    onClick={onDesign}
+                    disabled={!canDesign}
             className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             <FileText className="w-4 h-4" />
             Design
           </button>
-          <button
-            onClick={onGenerate}
-            disabled={!isConnected}
+                  <button
+                    onClick={onGenerate}
+                    disabled={!canGenerate}
             className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             <Code className="w-4 h-4" />
             Generate
           </button>
-          <button
-            onClick={onVerify}
-            disabled={!isConnected}
+                  <button
+                    onClick={onVerify}
+                    disabled={!canVerify}
             className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
           >
             <CheckCircle className="w-4 h-4" />
             Verify
           </button>
+                </>
+              );
+            })()}
         </div>
       </div>
     </div>
