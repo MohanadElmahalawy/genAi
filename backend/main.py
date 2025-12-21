@@ -15,7 +15,7 @@ from agent.explorer import PageExplorer
 from agent.designer import TestDesigner
 from agent.generator import CodeGenerator
 from agent.verifier import TestVerifier
-from agent.llm_client import LLMClient, NoTokensError
+from agent.llm_client import LLMClient,CopilotClient, NoTokensError
 from utils.browser import BrowserManager
 from utils.metrics import MetricsTracker
 from utils.langfuse_tracker import LangFuseTracker
@@ -36,7 +36,7 @@ class AgentState:
     def __init__(self):
         self.browser_manager = None
         self.langfuse = LangFuseTracker()
-        self.llm_client = LLMClient(langfuse_tracker=self.langfuse)
+        self.llm_client = CopilotClient(langfuse_tracker=self.langfuse)
         self.explorer = None
         self.designer = None
         self.generator = None
