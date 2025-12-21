@@ -92,7 +92,9 @@ class TestVerifier:
 
             # Persist the verification report to backend/verification_with_screenshots.json
             try:
-                report_path = pathlib.Path(__file__).resolve().parents[0] / "verification_with_screenshots.json"
+                # Write report to backend root so the main API can serve it at
+                # `/reports/verification`. `__file__.parents[1]` points to backend/.
+                report_path = pathlib.Path(__file__).resolve().parents[1] / "verification_with_screenshots.json"
                 tmp_path = report_path.with_suffix('.json.tmp')
                 with open(tmp_path, 'w', encoding='utf-8') as rf:
                     json.dump({
@@ -116,34 +118,51 @@ class TestVerifier:
     
     async def _run_pytest(self, test_file: str, websocket) -> dict:
         """Run pytest on the test file"""
-        
         start_time = time.time()
-        
+
         try:
-            # Run pytest with verbose output
-            process = await asyncio.create_subprocess_exec(
-                'pytest', test_file, '-v', '--tb=short',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await process.communicate()
-            
+            # Run pytest in-process so generated tests can access the same
+            # BrowserManager via the `verifier_shared` module. Running pytest
+            # in a subprocess isolates the process and prevents tests from
+            # using our browser instance for taking screenshots.
+            import io
+            import sys
+            import contextlib
+
+            # Try to set the shared browser reference for tests
+            try:
+                from . import verifier_shared
+                verifier_shared.set_browser(self.browser)
+            except Exception:
+                try:
+                    import verifier_shared
+                    verifier_shared.set_browser(self.browser)
+                except Exception:
+                    pass
+
+            loop = asyncio.get_event_loop()
+
+            def run_pytest_sync():
+                # Import pytest here to avoid importing it in the event loop
+                import pytest
+                out_buf = io.StringIO()
+                err_buf = io.StringIO()
+                with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                    rc = pytest.main([test_file, '-v', '--tb=short'])
+                return rc, out_buf.getvalue(), err_buf.getvalue()
+
+            rc, stdout_text, stderr_text = await loop.run_in_executor(None, run_pytest_sync)
+
             execution_time = time.time() - start_time
 
-            # Combine and decode output
-            raw_output = stdout.decode() + stderr.decode()
-
-            # Split into lines preserving order
+            raw_output = (stdout_text or "") + (stderr_text or "")
             lines = [l.rstrip() for l in raw_output.splitlines()]
 
-            # Match individual test result lines and the final summary line.
             pattern_test = re.compile(r"\b(PASSED|FAILED|ERROR)\b", re.I)
             pattern_summary = re.compile(r"=+.*\b(passed|failed|errors?|skipped|xfailed)\b.*in\s*[\d\.]+s.*=+", re.I)
 
             result_lines = [l for l in lines if pattern_test.search(l) or pattern_summary.search(l)]
 
-            # If a separate summary line exists but wasn't matched, append it.
             summary_line = None
             for l in reversed(lines):
                 if re.search(r"(\d+)\s+passed", l, re.I):
@@ -156,8 +175,6 @@ class TestVerifier:
 
             output = "\n".join(result_lines).strip()
 
-            # Parse numeric results from full raw output when possible (more reliable),
-            # otherwise fall back to counting matches in the filtered lines.
             passed = 0
             failed = 0
             errors = 0
@@ -179,14 +196,14 @@ class TestVerifier:
                 errors = int(m.group(1))
             else:
                 errors = sum(1 for l in result_lines if re.search(r"\berror\b", l, re.I))
-            
-            success = process.returncode == 0
-            
+
+            success = rc == 0
+
             await websocket.send_json({
                 "type": "progress",
                 "message": f"Tests completed: {passed} passed, {failed} failed"
             })
-            
+
             return {
                 "success": success,
                 "passed": passed,
@@ -197,7 +214,7 @@ class TestVerifier:
                 "screenshots": [],
                 "timestamp": time.time()
             }
-            
+
         except Exception as e:
             return {
                 "success": False,

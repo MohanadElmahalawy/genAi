@@ -15,7 +15,7 @@ from agent.explorer import PageExplorer
 from agent.designer import TestDesigner
 from agent.generator import CodeGenerator
 from agent.verifier import TestVerifier
-from agent.llm_client import LLMClient, NoTokensError
+from agent.llm_client import LLMClient,CopilotClient, NoTokensError
 from utils.browser import BrowserManager
 from utils.metrics import MetricsTracker
 
@@ -34,7 +34,7 @@ app.add_middleware(
 class AgentState:
     def __init__(self):
         self.browser_manager = None
-        self.llm_client = LLMClient()
+        self.llm_client = CopilotClient()
         self.explorer = None
         self.designer = None
         self.generator = None
