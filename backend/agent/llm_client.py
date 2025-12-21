@@ -1,14 +1,14 @@
 """
-LLM Client - 2025 Gemini Free Tier Integration
-Using the official Google Gen AI SDK (google-genai)
+LLM Client - Groq API Integration (Free Tier)
+Using OpenAI SDK with Groq endpoint - 14,400 requests/day FREE
 """
 
 import os
 import json
 import time
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
+from utils.langfuse_tracker import LangFuseTracker
 
 load_dotenv()
 
@@ -18,53 +18,74 @@ class NoTokensError(Exception):
     pass
 
 class LLMClient:
-    def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
+    def __init__(self, langfuse_tracker=None):
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment")
+            raise ValueError("GROQ_API_KEY not found in environment")
         
-        # New SDK Client
-        self.client = genai.Client(api_key=api_key)
-        # Gemini 3 Flash is the recommended fast model for 2025
-        self.model_id = "gemini-3-flash-preview"
+        self.client = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=api_key
+        )
+        # llama-3.3-70b-versatile is fast and powerful (free tier: 14,400 req/day)
+        self.model_id = "llama-3.3-70b-versatile"
+        self.langfuse = langfuse_tracker
         
     async def generate(self, prompt: str, max_tokens: int = 2048) -> dict:
         """
-        Generate response from LLM using current SDK methods.
+        Generate response from LLM using GitHub Copilot API.
         """
         start_time = time.time()
+        if self.langfuse:
+            self.langfuse.start_span("llm_generation", {"prompt": prompt[:200]})
         
         try:
-            # Note: client.models.generate_content is the new standard
-            response = self.client.models.generate_content(
+            # GitHub Copilot uses OpenAI's chat completion format
+            response = self.client.chat.completions.create(
                 model=self.model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=0.7,
-                )
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.7,
             )
             
             elapsed = time.time() - start_time
             
-            # The new SDK provides real token counts in usage_metadata (no more estimation!)
-            tokens = response.usage_metadata.total_token_count
+            # Extract token usage from response
+            tokens = response.usage.total_tokens if response.usage else 0
 
             # If the provider reports zero tokens, treat as token exhaustion and stop
             if tokens == 0:
                 raise NoTokensError("No tokens available from LLM provider")
 
-            return {
-                "text": response.text,
+            result = {
+                "text": response.choices[0].message.content,
                 "tokens": tokens,
                 "time": elapsed
             }
+            
+            # Log to LangFuse
+            if self.langfuse:
+                self.langfuse.log_generation(
+                    name="groq_generation",
+                    prompt=prompt,
+                    completion=response.choices[0].message.content,
+                    model=self.model_id,
+                    tokens=tokens,
+                    time=elapsed
+                )
+                self.langfuse.end_span(output_data=result)
+            
+            return result
             
         except Exception as e:
             # Detect quota / resource exhausted errors and escalate as NoTokensError
             err_str = str(e)
             print(f"LLM Error: {err_str}")
-            if "RESOURCE_EXHAUSTED" in err_str or "exceeded your current quota" in err_str or "quota" in err_str.lower():
+            if self.langfuse:
+                self.langfuse.end_span(metadata={"error": err_str})
+            if "RESOURCE_EXHAUSTED" in err_str or "exceeded your current quota" in err_str or "quota" in err_str.lower() or "rate_limit" in err_str.lower():
                 raise NoTokensError(err_str)
 
             return {
@@ -81,19 +102,28 @@ class LLMClient:
         # We add a specific instruction for JSON
         json_prompt = prompt + "\n\nIMPORTANT: Return ONLY a valid JSON object."
         result = await self.generate(json_prompt)
+        if self.langfuse:
+            self.langfuse.start_span("json_generation", {"prompt": prompt[:200]})
         
         try:
             text = result["text"]
             # Robust JSON extraction from markdown blocks
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
+            if "json" in text:
+                text = text.split("json")[1].split("")[0]
+            elif "" in text:
+                text = text.split("")[1].split("")[0]
             
             data = json.loads(text.strip())
             result["json"] = data
+            # End LangFuse span
+            if self.langfuse:
+                self.langfuse.end_span(output_data={"json_parsed": True})
             return result
+        
         except Exception as e:
             print(f"JSON Parsing Error: {e}")
             result["json"] = None
+            # End LangFuse span with error
+            if self.langfuse:
+                self.langfuse.end_span(metadata={"error": str(e), "json_parsed": False})
             return result

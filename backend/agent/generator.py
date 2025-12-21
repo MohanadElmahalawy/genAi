@@ -144,7 +144,7 @@ Only return the Python code, no explanations.
         
         return self._extract_code(result["text"])
 
-    async def verify_and_refine(self, code: str, verifier, websocket, max_rounds: int = 3) -> str:
+    async def verify_and_refine(self, code: str, verifier, websocket, max_rounds: int = 1) -> str:
         """
         Verify generated code using the TestVerifier. If verification fails,
         pass the failures to `refine_code` and retry up to `max_rounds` times.

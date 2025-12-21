@@ -18,6 +18,7 @@ from agent.verifier import TestVerifier
 from agent.llm_client import LLMClient, NoTokensError
 from utils.browser import BrowserManager
 from utils.metrics import MetricsTracker
+from utils.langfuse_tracker import LangFuseTracker
 
 app = FastAPI(title="Testing Agent API")
 
@@ -34,7 +35,8 @@ app.add_middleware(
 class AgentState:
     def __init__(self):
         self.browser_manager = None
-        self.llm_client = LLMClient()
+        self.langfuse = LangFuseTracker()
+        self.llm_client = LLMClient(langfuse_tracker=self.langfuse)
         self.explorer = None
         self.designer = None
         self.generator = None
@@ -52,6 +54,8 @@ class AgentState:
         self.test_cases = None
         self.generated_code = None
         self.metrics.reset()
+        # Flush LangFuse data
+        self.langfuse.flush()
         if self.browser_manager:
             asyncio.create_task(self.browser_manager.close())
             self.browser_manager = None
@@ -153,6 +157,9 @@ async def handle_explore(websocket: WebSocket, payload: dict):
         await websocket.send_json({"type": "error", "message": "URL is required"})
         return
     
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("page_exploration", user_id="user_session")
+    
     await websocket.send_json({
         "type": "phase_start",
         "phase": "exploration",
@@ -177,6 +184,11 @@ async def handle_explore(websocket: WebSocket, payload: dict):
         page_knowledge = await agent_state.explorer.explore(url, websocket)
         agent_state.page_knowledge = page_knowledge
         
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "elements_found": len(page_knowledge.get("elements", []))
+        })
+        
         # Send completion
         await websocket.send_json({
             "type": "phase_complete",
@@ -186,12 +198,14 @@ async def handle_explore(websocket: WebSocket, payload: dict):
         })
         
     except NoTokensError:
+        agent_state.langfuse.end_trace(output_data={"error": "token_exhaustion"})
         await websocket.send_json({
             "type": "error",
             "phase": "exploration",
             "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."
         })
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         await websocket.send_json({
             "type": "error",
             "phase": "exploration",
@@ -206,6 +220,9 @@ async def handle_design(websocket: WebSocket, payload: dict):
             "message": "Must explore page first"
         })
         return
+    
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("test_design")
     
     await websocket.send_json({
         "type": "phase_start",
@@ -226,6 +243,11 @@ async def handle_design(websocket: WebSocket, payload: dict):
         )
         agent_state.test_cases = test_cases
         
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "test_cases_count": len(test_cases.get("test_cases", []))
+        })
+        
         await websocket.send_json({
             "type": "phase_complete",
             "phase": "design",
@@ -234,6 +256,7 @@ async def handle_design(websocket: WebSocket, payload: dict):
         })
         
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         if isinstance(e, NoTokensError):
             await websocket.send_json({
                 "type": "error",
@@ -255,6 +278,9 @@ async def handle_refine(websocket: WebSocket, payload: dict):
         return
 
     feedback = payload.get("feedback", "")
+    
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("test_design_refinement")
 
     await websocket.send_json({
         "type": "phase_start",
@@ -276,6 +302,12 @@ async def handle_refine(websocket: WebSocket, payload: dict):
             "coverage": refined.get("coverage", agent_state.test_cases.get("coverage")),
             "timestamp": refined.get("timestamp", agent_state.metrics.get_timestamp())
         }
+        
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "feedback": feedback,
+            "test_cases_count": len(agent_state.test_cases.get("test_cases", []))
+        })
 
         await websocket.send_json({
             "type": "phase_complete",
@@ -285,6 +317,7 @@ async def handle_refine(websocket: WebSocket, payload: dict):
         })
 
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         if isinstance(e, NoTokensError):
             await websocket.send_json({"type": "error", "phase": "design_refinement", "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."})
         else:
@@ -298,6 +331,9 @@ async def handle_refine_code(websocket: WebSocket, payload: dict):
         return
 
     issue = payload.get("issue", "")
+    
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("code_refinement")
 
     await websocket.send_json({
         "type": "phase_start",
@@ -314,6 +350,12 @@ async def handle_refine_code(websocket: WebSocket, payload: dict):
 
         refined_code = await agent_state.generator.refine_code(agent_state.generated_code, issue, websocket)
         agent_state.generated_code = refined_code
+        
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "issue": issue,
+            "code_length": len(refined_code)
+        })
 
         await websocket.send_json({
             "type": "phase_complete",
@@ -323,6 +365,7 @@ async def handle_refine_code(websocket: WebSocket, payload: dict):
         })
 
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         if isinstance(e, NoTokensError):
             await websocket.send_json({"type": "error", "phase": "generation_refinement", "message": "No more tokens available from LLM provider. Please refill quota or reset the agent."})
         else:
@@ -336,6 +379,9 @@ async def handle_generate(websocket: WebSocket, payload: dict):
             "message": "Must design test cases first"
         })
         return
+    
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("code_generation")
     
     await websocket.send_json({
         "type": "phase_start",
@@ -369,6 +415,12 @@ async def handle_generate(websocket: WebSocket, payload: dict):
         verification = vr.get("verification") if isinstance(vr, dict) else None
 
         agent_state.generated_code = final_code
+        
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "code_length": len(final_code),
+            "verification": verification
+        })
 
         await websocket.send_json({
             "type": "phase_complete",
@@ -378,6 +430,7 @@ async def handle_generate(websocket: WebSocket, payload: dict):
         })
         
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         if isinstance(e, NoTokensError):
             await websocket.send_json({
                 "type": "error",
@@ -400,6 +453,9 @@ async def handle_verify(websocket: WebSocket, payload: dict):
         })
         return
     
+    # Start LangFuse trace
+    agent_state.langfuse.start_trace("test_verification")
+    
     await websocket.send_json({
         "type": "phase_start",
         "phase": "verification",
@@ -418,6 +474,13 @@ async def handle_verify(websocket: WebSocket, payload: dict):
             websocket
         )
         
+        # End LangFuse trace
+        agent_state.langfuse.end_trace(output_data={
+            "passed": results.get("passed", 0),
+            "failed": results.get("failed", 0),
+            "success": results.get("success", False)
+        })
+        
         await websocket.send_json({
             "type": "phase_complete",
             "phase": "verification",
@@ -426,6 +489,7 @@ async def handle_verify(websocket: WebSocket, payload: dict):
         })
         
     except Exception as e:
+        agent_state.langfuse.end_trace(output_data={"error": str(e)})
         if isinstance(e, NoTokensError):
             await websocket.send_json({
                 "type": "error",
